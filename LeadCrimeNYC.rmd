@@ -1,0 +1,223 @@
+---
+output: html_document
+title: "Investigating the Relationship Between Lead Exposure and Major Felonies in New York City"
+author: "Bryce Chapman"
+bibliography: "./references.bib"
+link-citations: true
+csl: "C://Users//bryco//Documents//Resources//BibStyles//ieee.csl"
+---
+```{r setup, include=FALSE}
+# knitting settings
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+
+# libraries
+library(readxl) # read Excel files
+library(readr) # read csv files
+library(dplyr) # data manipulation
+library(stringr) # string find
+library(tidyr) # clean up data
+library(tibble) # creating data frame
+library(forcats) # working with categorical variables
+library(ggplot2) #plotting
+library(RColorBrewer) # plot color theemes
+library(secret) # for hiding api keys
+library(censusapi) # for some census data
+```
+## Abstract
+
+## Introduction
+
+- Introduce lead-crime hypothesis
+  - What it is: 
+  - Advocate studies:
+  - Drawbacks/Issues:
+- History of lead in NYC
+- Purpose of this:
+## Methods
+
+
+
+```{r population-api-carpentry}
+# get census data from the last two decades
+
+# population estimates/values from the 2000s in each Borough
+popest_2000s <- getCensus(
+  key = Sys.getenv("CENSUS_API"),
+  name = "pep/int_population",
+  vintage = "2000",
+  DATE_ = "7:11",
+  vars = c("POP"),
+  region = "county:005,047,061,081,085",
+  regionin = "state:36") %>%
+  mutate(Year = case_when(DATE_ == "7" ~ "2005",
+                          DATE_ == "8" ~ "2006",
+                          DATE_ == "9" ~ "2007",
+                          DATE_ == "10" ~ "2008",
+                          DATE_ == "11" ~ "2009")) %>%
+  mutate('Borough' = case_when(county == "005" ~ "Bronx",
+                               county == "047" ~ "Brooklyn",
+                               county == "061" ~ "Manhattan",
+                               county == "081" ~ "Queens",
+                               county == "085" ~ "Staten Island")) %>% 
+  select(-c(state,DATE_,county)) %>% 
+  relocate(Year) %>% 
+  relocate(Borough) %>% 
+  rename(Population = POP) %>% 
+  as_tibble()
+
+# population estimates/values from the 2010s in each Borough
+# load in data from 
+popest_2010s <- getCensus(
+                          key = Sys.getenv("CENSUS_API"),
+                          name = "pep/population",
+                          vintage = "2019",
+                          DATE_CODE = "3:12",
+                          vars = c("POP"),
+                          region = "county:005,047,061,081,085",
+                          regionin = "state:36")%>%
+  # make each date code value its respective year
+  mutate(Year = case_when(DATE_CODE == "3" ~ "2010",
+                          DATE_CODE == "4" ~ "2011",
+                          DATE_CODE == "5" ~ "2012",
+                          DATE_CODE == "6" ~ "2013",
+                          DATE_CODE == "7" ~ "2014",
+                          DATE_CODE == "8" ~ "2015",
+                          DATE_CODE == "9" ~ "2016",
+                          DATE_CODE == "10" ~ "2017",
+                          DATE_CODE == "11" ~ "2018",
+                          DATE_CODE == "12" ~ "2019")) %>%
+  mutate('Borough' = case_when(county == "005" ~ "Bronx",
+                               county == "047" ~ "Brooklyn",
+                               county == "061" ~ "Manhattan",
+                               county == "081" ~ "Queens",
+                               county == "085" ~ "Staten Island")) %>% 
+  select(-c(state,DATE_CODE,county)) %>% 
+  relocate(Year) %>% 
+  relocate(Borough) %>% 
+  rename(Population = POP) %>% 
+  as_tibble()
+
+# combine the two decade's datasets
+Popest <- bind_rows(popest_2000s,popest_2010s) %>%
+  mutate(across(c("Borough","Year"),as_factor))
+
+```
+
+
+```{r lead-data-carpentry}
+# Loading in lead data and separating it into city, borough, and neighborhood data
+
+
+lead_df <- read_csv("./Data/LeadLevels_2005-2019.csv", skip = 6, n_max = 720,show_col_types = FALSE) %>%
+  select(-c("Geography ID", "Indicator Name", contains("Notes"),'...21')) %>% 
+  mutate(across(c("Year","GeoTypeName","Geography","Borough"),as_factor))
+
+  
+lead_city_df <- lead_df %>% 
+  filter(GeoTypeName == "Citywide", .preserve = FALSE)
+lead_borough_df <- lead_df %>% 
+  filter(GeoTypeName == "Borough", .preserve = FALSE)
+lead_nbd_df <- lead_df %>% 
+  filter(str_detect(GeoTypeName,"Neighborhood"), .preserve = FALSE)
+```
+
+```{r crime-data-carpentry}
+# Loading in crime data
+major_felony_df <- read_xls("./Data/seven-major-felony-offenses-by-precinct-2000-2021.xls",
+                     skip = 1, n_max = 616) %>%
+  rename(Crime = CRIME) %>% 
+  select(-c("2000","2001","2002","2003","2004","2020","2021")) %>% 
+  fill(PCT) %>% 
+  mutate(Borough = case_when(PCT<40 ~ 'Manhattan',
+                             PCT>=40 & PCT<60 ~ 'Bronx',
+                             PCT>=60 & PCT<100 ~ 'Brooklyn',
+                             PCT>=100 & PCT<120 ~ 'Queens',
+                             PCT>=120 ~ 'Staten Island')) %>%  
+  relocate(Borough, .after=PCT) %>%
+  mutate(across(c("PCT","Borough","Crime"),as_factor)) %>%
+  pivot_longer(cols = !c(PCT,Borough,Crime), names_to = "Year", values_to = "Total") %>%
+  rename(Precinct = PCT) %>%
+  mutate(Total = coalesce(Total,0)) %>% 
+  mutate(Crime = recode_factor(Crime, "MURDER & NON NEGL. MANSLAUGHTER" = "Murder", 
+                               "RAPE" = "Rape", "ROBBERY" = "Robbery", "FELONY ASSAULT" = "Assault", 
+                               "BURGLARY" = "Burglary", "GRAND LARCENY" = "Larceny" , 
+                               "GRAND LARCENY OF MOTOR VEHICLE" = "Larceny of MV",
+                               "TOTAL SEVEN MAJOR FELONY OFFENSES" = "All 7 Felonies"))
+
+Crimes <-  levels(major_felony_df$Crime)
+Years <- levels(major_felony_df$Year)
+Boroughs <- levels(major_felony_df$Borough)
+
+major_felony_borough_df <- aggregate(list(Total = major_felony_df$Total), by = list(Borough = major_felony_df$Borough,
+                                                   Crime = major_felony_df$Crime,
+                                                   Year = major_felony_df$Year),
+                                     FUN = sum)
+
+# next to do is make the crime data per capita
+major_felony_borough_pop_df <- left_join(x = major_felony_borough_df, y = Popest,
+                                         by = c("Borough", "Year")) %>% 
+  mutate(PerCapita = Total*100000/Population) %>% 
+  mutate(Group = case_when(Crime == "Murder" | Crime == "Rape" | Crime == "Robbery" | Crime == "Assault" ~ 1,
+                           Crime == "Burglary" | Crime == "Larceny" | Crime == "Larceny of MV" | 
+                             Crime == "All 7 Felonies" ~ 2))
+
+
+```
+
+
+Crime data comes from the New York Police Department's historical data website [@NewYorkPoliceDepartment2022]. 
+
+Lead data comes from the New York City Environmental Health and Data Portal [@TheCityofNewYork2022].
+
+Population data comes from U.S. Census estimates through the Census API system [@CensusAPI].
+Information for the API can be found [here](https://www.census.gov/data/developers/data-sets/popest-popproj/popest.Vintage_2021.html) and information for its variables can be found [here](https://www.census.gov/data/developers/data-sets/popest-popproj/popest/popest-vars.Vintage_2013.html). County and state numbers can be found [here](https://www.census.gov/library/reference/code-lists/ansi.html).
+
+## Results and Discussion
+
+### Lead Accumulation Over Time
+
+```{r, lead-visualization}
+lead_borough_df %>%
+  ggplot(aes(x = Year, y = `Rate BLL >=5 µg/dL (per 1,000 tested)`, color = Borough,group = Borough)) + 
+  geom_point(size = 2)+
+  geom_line()+
+  theme_bw() + 
+  scale_color_brewer(palette = "Set1")
+```
+
+### Crime Change Over Time
+```{r, crime-visualization, fig.show = "hold"}
+major_felony_borough_pop_df %>%
+  filter(Group == 1) %>% 
+  ggplot(aes(x = Year, y = PerCapita, color = Borough)) + 
+  facet_grid(vars(Crime), scales = "free") + 
+  geom_point()+
+  theme_bw() + 
+  scale_color_brewer(palette = "Set1") 
+major_felony_borough_pop_df %>%
+  filter(Group == 2) %>% 
+  ggplot(aes(x = Year, y = PerCapita, color = Borough)) + 
+  facet_grid(vars(Crime), scales = "free") + 
+  geom_point()+
+  theme_bw() + 
+  scale_color_brewer(palette = "Set1") + 
+  ylab("Crimes Committed per 100,000 People")
+
+```
+
+### Granger-Causality Test
+
+## Conclusion
+
+- result summary
+- next steps:
+  - go down to a smaller level
+  - include data on covariants:
+    - economic data
+    - general health factors
+
+## Bibliography
+
+<div id="refs"></div>
